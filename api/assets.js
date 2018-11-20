@@ -60,34 +60,38 @@ router.post('/assets', async (req, res, next) => {
     `
 
     //Check asset image is an image and is of suitable file size
-    let file_type = await (() => {
-        switch (asset.asset_image.slice(0, 1)) {
-            case '/':
-                return 'image/jpeg'
-                break;
-            case 'i':
-                return 'image/png'
-                break;
-            case 'R':
-                return 'image/gif'
-                break;
-            default:
-                throw new Error('File type is not an accepted image type')
-                break;
-        }
-    })();
-    let file_size = await Buffer.byteLength(asset.asset_image) / 1000
-
-    let ready_image = await (() => {
-        if (file_type && file_size < 1000) {
-            return {
-                body: Buffer.from(asset.asset_image, 'base64'),
-                type: file_type
+    let file_type = null
+    let ready_image = null
+    if (asset.asset_image.length > 0) {
+        file_type = await (() => {
+            switch (asset.asset_image.slice(0, 1)) {
+                case '/':
+                    return 'image/jpeg'
+                    break;
+                case 'i':
+                    return 'image/png'
+                    break;
+                case 'R':
+                    return 'image/gif'
+                    break;
+                default:
+                    throw new Error('File type is not an accepted image type')
+                    break;
             }
-        } else {
-            throw new Error('There was a problem uploading the image')
-        }
-    })();
+        })();
+        let file_size = await Buffer.byteLength(asset.asset_image) / 1000
+
+        ready_image = await (() => {
+            if (file_type && file_size < 1000) {
+                return {
+                    body: Buffer.from(asset.asset_image, 'base64'),
+                    type: file_type
+                }
+            } else {
+                throw new Error('There was a problem uploading the image')
+            }
+        })();
+    }
 
     //Attempt to connect to the pool, catching a connection error if fail                
     try {
@@ -97,6 +101,7 @@ router.post('/assets', async (req, res, next) => {
     }
 
     //Begin the query, catching an error will attempt a rollback
+    let result = null
     try {
         await client.query('BEGIN')
         result = await client.query(query, [
@@ -112,39 +117,48 @@ router.post('/assets', async (req, res, next) => {
         await console.log("Asset creation query succesfully commited!")
 
         // use new asset_id to upload image to S3 and update asset with new URL
+        let update = null
+        if (ready_image) {
+            try {
+                let asset_image_url = ''
+                let asset_id = result.rows[0].asset_id
+                let params = {
+                    Bucket: 'asset-registry-assets',
+                    Key: 'asset_id' + '_' + asset_id,
+                    Body: ready_image.body,
+                    ContentType: ready_image.type
+                }
+                console.log("uploading image");
 
-        try {
-            let asset_image_url = ''
-            let asset_id = result.rows[0].asset_id
-            let params = {
-                Bucket: 'asset-registry-assets',
-                Key: 'asset_id' + '_' + asset_id,
-                Body: ready_image.body,
-                ContentType: ready_image.type
+                let s3UploadPromise = await s3.upload(params).promise()
+                asset_image_url = s3UploadPromise.Location
+
+                let update_query = `
+            UPDATE assets
+            SET asset_image_url = $1
+            WHERE asset_id = $2
+            RETURNING *
+            `
+                await client.query('BEGIN')
+                update = await client.query(update_query, [asset_image_url, asset_id])
+                await client.query('COMMIT')
+                await console.log("Asset update query succesfully commited!")
+            } catch (error) {
+                await console.log("An error occured updating the assets image", error);
+                await client.query('ROLLBACK')
             }
-            console.log("uploading image");
-
-            let s3UploadPromise = await s3.upload(params).promise()
-            asset_image_url = s3UploadPromise.Location
-
-            let update_query = `
-                UPDATE assets
-                SET asset_image_url = $1
-                WHERE asset_id = $2
-                RETURNING *
-                `
-            await client.query('BEGIN')
-            update = await client.query(update_query, [asset_image_url, asset_id])
-            await client.query('COMMIT')
-            await console.log("Asset update query succesfully commited!")
-        } catch (error) {
-            await console.log("An error occured updating the assets image", error);
-            await client.query('ROLLBACK')
         }
 
-        await res.json({
-            new_asset: update.rows[0]
-        }).status(200)
+        if (update) {
+            await res.json({
+                new_asset: update.rows[0]
+            }).status(200)
+        } else {
+            await res.json({
+                new_asset: result.rows[0]
+            }).status(200)
+        }
+        
     }
 
     //Begin roll back if error caught
