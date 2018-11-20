@@ -8,9 +8,4 @@ aws.config.update({
 
 const s3 = new aws.S3();
 
-const s3Upload = async function(bucket, key_ref, key_id, body, MIMEType) {
-
-}
-
-
 module.exports = { s3 }
