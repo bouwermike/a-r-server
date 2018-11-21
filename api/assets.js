@@ -5,6 +5,9 @@ const {
 const {
     s3
 } = require('../aws.js')
+const {
+    addToIndex
+} = require('../search/elasticsearch.js')
 let router = express()
 
 
@@ -149,16 +152,27 @@ router.post('/assets', async (req, res, next) => {
             }
         }
 
+
         if (update) {
+            // Index the new asset in elastic search
+            await addToIndex('asset-register-assets', 'assets_list', {
+                asset_id:  update.rows[0].asset_id.toString(),
+                user_asset_state: update.rows[0].user_asset_state.toString(),
+                asset_serial_number: update.rows[0].asset_serial_number.toString()
+            })
             await res.json({
                 new_asset: update.rows[0]
             }).status(200)
         } else {
+            await addToIndex('asset-register-assets', 'assets_list', {
+                asset_id: result.rows[0].asset_id.toString(),
+                user_asset_state: result.rows[0].user_asset_state.toString(),
+                asset_serial_number: result.rows[0].asset_serial_number.toString()
+            })
             await res.json({
                 new_asset: result.rows[0]
             }).status(200)
         }
-        
     }
 
     //Begin roll back if error caught

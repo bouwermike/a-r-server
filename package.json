@@ -12,6 +12,7 @@
     "aws-sdk": "^2.358.0",
     "bcrypt": "^3.0.2",
     "body-parser": "^1.18.3",
+    "elasticsearch": "^15.2.0",
     "express": "^4.16.4",
     "jsonwebtoken": "^8.4.0",
     "multer": "^1.4.1",
