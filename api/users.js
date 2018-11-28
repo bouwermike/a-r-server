@@ -1,10 +1,11 @@
 const express = require('express')
 const {
-    Pool
-} = require('pg')
-const {
-    s3
-} = require('../aws.js')
+    pool,
+    s3,
+    s3Upload,
+    checkImageMIMEType,
+    checkImageSize
+} = require('./helpers.js')
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
 let router = express()
@@ -13,10 +14,6 @@ let router = express()
 //create a new user
 router.post('/register', async (req, res, next) => {
     let user = req.body.new_user
-    const pool = new Pool({
-        connectionString: process.env.DB_URI,
-        ssl: true
-    })
 
     let client = null
     let query = `
@@ -35,27 +32,12 @@ router.post('/register', async (req, res, next) => {
     //Encrypt the users password
     let hash = await bcrypt.hash(user.password, 10)
 
-    //Check asset image is an image and is of suitable file size
+    //Check user image is an image and is of suitable file size
     let file_type = null
     let ready_image = null
     if (user.user_image) {
-        file_type = await (() => {
-            switch (user.user_image.slice(0, 1)) {
-                case '/':
-                    return 'image/jpeg'
-                    break;
-                case 'i':
-                    return 'image/png'
-                    break;
-                case 'R':
-                    return 'image/gif'
-                    break;
-                default:
-                    throw new Error('File type is not an accepted image type')
-                    break;
-            }
-        })();
-        let file_size = await Buffer.byteLength(user.user_image) / 1000
+        file_type = await checkImageMIMEType(user.user_image)
+        let file_size = await checkImageSize(user.user_image)
 
         ready_image = await (() => {
             if (file_type && file_size < 1000) {
@@ -89,8 +71,6 @@ router.post('/register', async (req, res, next) => {
             hash
 
         ])
-        await client.query('COMMIT')
-        await console.log("User creation query succesfully commited!")
 
         // use new asset_id to upload image to S3 and update asset with new URL
         let update = null
@@ -115,16 +95,16 @@ router.post('/register', async (req, res, next) => {
                     WHERE user_id = $2
                     RETURNING *
                     `
-                await client.query('BEGIN')
+
                 update = await client.query(update_query, [user_image_url, user_id])
-                await client.query('COMMIT')
-                await console.log("User update query succesfully commited!")
+
             } catch (error) {
                 await console.log("An error occured updating the users image", error);
-                await client.query('ROLLBACK')
             }
         }
 
+        await client.query('COMMIT')
+        await console.log("User update query succesfully commited!")
 
         if (update) {
             let token = jwt.sign(update.rows[0], process.env.JWT_SECRET)
@@ -161,14 +141,12 @@ router.post('/register', async (req, res, next) => {
 //signin a user
 router.post('/signin', async (req, res, next) => {
     let signin_packet = req.body.signin_packet
-    const pool = new Pool({
-        connectionString: process.env.DB_URI,
-        ssl: true
-    })
 
     let client = null
     let query = `
-    SELECT * FROM USERS
+    SELECT 
+    *
+    FROM USERS
     WHERE email = $1
     `
     //Attempt to connect to the pool, catching a connection error if fail                
@@ -180,16 +158,25 @@ router.post('/signin', async (req, res, next) => {
     // Fetch the user and compare passwords
     try {
         let result = await client.query(query, [signin_packet.email])
-        
+
         if (result.rows[0]) {
             let user = result.rows[0]
             let compare = await bcrypt.compare(signin_packet.password, user.password)
-            
-            if(compare) {
-                let token = jwt.sign(user,process.env.JWT_SECRET)
+
+            if (compare) {
+                let safe_user = {
+                    user_id: user.user_id,
+                    first_name: user.first_name,
+                    last_name: user.last_name,
+                    email: user.email,
+                    user_image_url: user.user_image_url,
+                    verified: user.verified,
+                    created: user.created
+                }
+                let token = jwt.sign(safe_user, process.env.JWT_SECRET)
                 res.json({
                     auth: true,
-                    user: user,
+                    user: safe_user,
                     token: token
                 })
             } else {
@@ -207,7 +194,9 @@ router.post('/signin', async (req, res, next) => {
 
     } catch (error) {
         console.log(error);
-        
+
+    } finally {
+        client.release()
     }
 
 })
