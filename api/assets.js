@@ -140,7 +140,7 @@ router.post('/assets', async (req, res, next) => {
             RETURNING *
             `
                 update = await client.query(update_query, [asset_image_url, asset_id])
-                
+
             } catch (error) {
                 await console.log("An error occured updating the assets image", error);
             }
@@ -196,11 +196,15 @@ router.post('/assets', async (req, res, next) => {
 
 //get an asset by it's ID
 router.put('/assets', async (req, res, next) => {
-    let is_image_change = req.body.is_image_change
-    let asset = req.body.asset
+    let asset = req.body.updated_asset
+    console.log(asset);
 
     let client = null
-    let query = `
+    let select_query = `
+    SELECT * FROM assets
+    WHERE  asset_id = $1
+    `
+    let update_query = `
     UPDATE assets
         SET user_asset_state = $1,
             asset_type = $2,
@@ -216,23 +220,8 @@ router.put('/assets', async (req, res, next) => {
     let file_type = null
     let ready_image = null
     if (asset.asset_image.length > 0) {
-        file_type = await (() => {
-            switch (asset.asset_image.slice(0, 1)) {
-                case '/':
-                    return 'image/jpeg'
-                    break;
-                case 'i':
-                    return 'image/png'
-                    break;
-                case 'R':
-                    return 'image/gif'
-                    break;
-                default:
-                    throw new Error('File type is not an accepted image type')
-                    break;
-            }
-        })();
-        let file_size = await Buffer.byteLength(asset.asset_image) / 1000
+        file_type = await checkImageMIMEType(asset.asset_image)
+        let file_size = await checkImageSize(asset.asset_image)
 
         ready_image = await (() => {
             if (file_type && file_size < 1000) {
@@ -241,39 +230,69 @@ router.put('/assets', async (req, res, next) => {
                     type: file_type
                 }
             } else {
-                throw new Error('There was a problem uploading the image')
+                throw new Error('The file type or file size was incorrect')
             }
         })();
+        try {
+            let params = {
+                Bucket: 'asset-registry-assets',
+                Key: 'asset_id' + '_' + asset_id,
+                Body: ready_image.body,
+                ContentType: ready_image.type
+            }
+            console.log("uploading image");
 
-        let params = {
-            Bucket: 'asset-registry-assets',
-            Key: 'asset_id' + '_' + asset_id,
-            Body: ready_image.body,
-            ContentType: ready_image.type
+            let s3UploadPromise = await s3.upload(params).promise()
+            asset.asset_image_url = s3UploadPromise.Location
+        } catch (error) {
+            console.log(error);
         }
-        console.log("uploading image");
-
-        let s3UploadPromise = await s3.upload(params).promise()
-        asset.asset_image_url = s3UploadPromise.Location
     }
 
 
     try {
         client = await pool.connect()
-        let update = await client.query(query, [
-            asset.user_asset_state,
-            asset.asset_type,
-            asset.asset_description,
-            asset.asset_image_url,
-            asset.asset_serial_number,
-            asset.asset_name
+        //get the original asset
+        client.query('BEGIN')
+        let selected_asset = await client.query(select_query, [
+            asset.asset_id
         ])
-        await res.json({
-            data: update.rows
-        })
-        await client.release()
+
+        let update = null
+        if (ready_image) {
+            update = await client.query(update_query, [
+                asset.user_asset_state,
+                asset.asset_type,
+                asset.asset_description,
+                asset.asset_image_url,
+                asset.asset_serial_number,
+                asset.asset_name,
+                asset.asset_id
+            ])
+            await client.query('COMMIT')
+            await res.json({
+                data: update.rows[0]
+            })
+        } else {
+            update = await client.query(update_query, [
+                asset.user_asset_state,
+                asset.asset_type,
+                asset.asset_description,
+                selected_asset.rows[0].asset_image_url,
+                asset.asset_serial_number,
+                asset.asset_name,
+                asset.asset_id
+            ])
+            await client.query('COMMIT')
+            await res.json({
+                data: update.rows[0]
+            })
+        }
+
     } catch (error) {
-        console.log("An error fetching the asset occured", error)
+        console.log("An error occured updating the asset", error)
+    } finally {
+        await client.release()
     }
 })
 
